@@ -1301,12 +1301,17 @@ window.App = (function () {
     function elementBounds(el) {
         if (!el) return null;
         if (el.type === 'arrow') {
-            return {
-                x: Math.min(el.x1, el.x2),
-                y: Math.min(el.y1, el.y2),
-                w: Math.abs(el.x2 - el.x1),
-                h: Math.abs(el.y2 - el.y1),
-            };
+            let minX = Math.min(el.x1, el.x2);
+            let minY = Math.min(el.y1, el.y2);
+            let maxX = Math.max(el.x1, el.x2);
+            let maxY = Math.max(el.y1, el.y2);
+            if (el.cx !== undefined && el.cx !== null && el.cy !== undefined && el.cy !== null) {
+                minX = Math.min(minX, el.cx);
+                minY = Math.min(minY, el.cy);
+                maxX = Math.max(maxX, el.cx);
+                maxY = Math.max(maxY, el.cy);
+            }
+            return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
         }
         return { x: el.x, y: el.y, w: el.w, h: el.h };
     }
@@ -1828,21 +1833,29 @@ window.App = (function () {
             const g = svgEl('g', { 'data-id': el.id, 'data-type': 'arrow' });
             const color = (el.style && el.style.color) || '#333';
             const width = (el.style && el.style.width) || 2;
+            const hasCurve = el.cx !== undefined && el.cx !== null && el.cy !== undefined && el.cy !== null;
+            // Build path data: quadratic curve if curved, straight line otherwise
+            const d = hasCurve
+                ? `M ${el.x1} ${el.y1} Q ${el.cx} ${el.cy} ${el.x2} ${el.y2}`
+                : `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2}`;
             // Hit area
-            const hit = svgEl('line', {
-                x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2,
+            const hit = svgEl('path', {
+                d, fill: 'none',
                 stroke: 'transparent', 'stroke-width': Math.max(CONFIG.ARROW_HIT_WIDTH, width),
                 'stroke-linecap': 'round', 'pointer-events': 'stroke', 'class': 'el-hit',
             });
             g.appendChild(hit);
-            const line = svgEl('line', {
-                x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2,
+            const line = svgEl('path', {
+                d, fill: 'none',
                 stroke: color, 'stroke-width': width, 'stroke-linecap': 'round',
                 'pointer-events': 'none',
             });
             g.appendChild(line);
-            // Arrowhead
-            const angle = Math.atan2(el.y2 - el.y1, el.x2 - el.x1);
+            // Arrowhead — tangent at the end of the curve
+            // For quadratic bezier, end tangent direction = (P2 - C); for straight line = (P2 - P1)
+            const tangentX = hasCurve ? (el.x2 - el.cx) : (el.x2 - el.x1);
+            const tangentY = hasCurve ? (el.y2 - el.cy) : (el.y2 - el.y1);
+            const angle = Math.atan2(tangentY, tangentX);
             const headLen = 8 + width * 2.2;
             const a1 = angle - Math.PI / 7;
             const a2 = angle + Math.PI / 7;
@@ -1881,14 +1894,23 @@ window.App = (function () {
         }
 
         if (els.length === 1 && els[0].type === 'arrow') {
-            // Arrow endpoint handles
+            // Arrow endpoint handles + curve control handle
             const el = els[0];
             const p1 = worldToCanvas(el.x1, el.y1);
             const p2 = worldToCanvas(el.x2, el.y2);
+            const hasCurve = el.cx !== undefined && el.cx !== null && el.cy !== undefined && el.cy !== null;
+            const ctrlX = hasCurve ? el.cx : (el.x1 + el.x2) / 2;
+            const ctrlY = hasCurve ? el.cy : (el.y1 + el.y2) / 2;
+            const pc = worldToCanvas(ctrlX, ctrlY);
             const h1 = svgEl('circle', {
                 cx: p1.x, cy: p1.y, r: CONFIG.HANDLE_SIZE + 1,
                 'class': 'arrow-handle', 'data-handle': 'arrow-start',
                 style: 'pointer-events:all;',
+            });
+            const hc = svgEl('circle', {
+                cx: pc.x, cy: pc.y, r: CONFIG.HANDLE_SIZE,
+                'class': 'arrow-handle', 'data-handle': 'arrow-ctrl',
+                style: 'pointer-events:all;cursor:move;',
             });
             const h2 = svgEl('circle', {
                 cx: p2.x, cy: p2.y, r: CONFIG.HANDLE_SIZE + 1,
@@ -1896,6 +1918,7 @@ window.App = (function () {
                 style: 'pointer-events:all;',
             });
             D.selectionG.appendChild(h1);
+            D.selectionG.appendChild(hc);
             D.selectionG.appendChild(h2);
             return;
         }
@@ -2366,6 +2389,39 @@ window.App = (function () {
             });
             wInput.addEventListener('change', commitAfter);
             addRow([addLabel(t('width')), wInput]);
+
+            // Curve toggle button — flips between straight and curved
+            const hasCurve = el.cx !== undefined && el.cx !== null && el.cy !== undefined && el.cy !== null;
+            const curveBtn = document.createElement('button');
+            curveBtn.className = 'prop-btn' + (hasCurve ? ' active' : '');
+            curveBtn.textContent = 'Curve';
+            curveBtn.title = hasCurve ? 'Straighten arrow' : 'Curve arrow';
+            curveBtn.addEventListener('click', () => {
+                snapshotBefore();
+                if (el.cx !== undefined && el.cx !== null) {
+                    // Straighten
+                    delete el.cx;
+                    delete el.cy;
+                } else {
+                    // Add a pleasant default curve (perpendicular offset at midpoint)
+                    const mx = (el.x1 + el.x2) / 2;
+                    const my = (el.y1 + el.y2) / 2;
+                    const dx = el.x2 - el.x1;
+                    const dy = el.y2 - el.y1;
+                    const len = Math.hypot(dx, dy) || 1;
+                    const offset = len * 0.25;
+                    el.cx = mx - (dy / len) * offset;
+                    el.cy = my + (dx / len) * offset;
+                }
+                renderElements();
+                renderSelection();
+                renderProperties();
+                commitAfter();
+            });
+            const curveActions = document.createElement('div');
+            curveActions.className = 'prop-group';
+            curveActions.appendChild(curveBtn);
+            addRow([addLabel(''), curveActions]);
         }
 
         D.props.classList.add('visible');
@@ -2684,6 +2740,8 @@ window.App = (function () {
                 el.y1 += CONFIG.PASTE_OFFSET;
                 el.x2 += CONFIG.PASTE_OFFSET;
                 el.y2 += CONFIG.PASTE_OFFSET;
+                if (el.cx !== undefined && el.cx !== null) el.cx += CONFIG.PASTE_OFFSET;
+                if (el.cy !== undefined && el.cy !== null) el.cy += CONFIG.PASTE_OFFSET;
             } else {
                 el.x += CONFIG.PASTE_OFFSET;
                 el.y += CONFIG.PASTE_OFFSET;
@@ -2982,7 +3040,8 @@ window.App = (function () {
                 const el2 = getElement(id);
                 if (!el2) continue;
                 if (el2.type === 'arrow') {
-                    snaps.push({ id, type: 'arrow', x1: el2.x1, y1: el2.y1, x2: el2.x2, y2: el2.y2 });
+                    snaps.push({ id, type: 'arrow', x1: el2.x1, y1: el2.y1, x2: el2.x2, y2: el2.y2,
+                        cx: el2.cx, cy: el2.cy });
                 } else {
                     snaps.push({ id, type: el2.type, x: el2.x, y: el2.y });
                 }
@@ -3031,16 +3090,29 @@ window.App = (function () {
         const els = getSelected();
         if (!els.length) return;
 
-        if (handle === 'arrow-start' || handle === 'arrow-end') {
+        if (handle === 'arrow-start' || handle === 'arrow-end' || handle === 'arrow-ctrl') {
             const el = els[0];
             if (!el || el.type !== 'arrow') return;
-            S.drag = {
-                type: 'arrow-endpoint',
-                which: handle === 'arrow-start' ? 'start' : 'end',
-                elId: el.id,
-                x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2,
-                moved: false,
-            };
+            if (handle === 'arrow-ctrl') {
+                // Dragging the middle control point curves (or re-curves) the arrow
+                const hasCurve = el.cx !== undefined && el.cx !== null && el.cy !== undefined && el.cy !== null;
+                S.drag = {
+                    type: 'arrow-control',
+                    elId: el.id,
+                    cx0: hasCurve ? el.cx : (el.x1 + el.x2) / 2,
+                    cy0: hasCurve ? el.cy : (el.y1 + el.y2) / 2,
+                    startWorld: screenToWorld(e.clientX, e.clientY),
+                    moved: false,
+                };
+            } else {
+                S.drag = {
+                    type: 'arrow-endpoint',
+                    which: handle === 'arrow-start' ? 'start' : 'end',
+                    elId: el.id,
+                    x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2,
+                    moved: false,
+                };
+            }
             attachDragListeners();
             e.preventDefault();
             return;
@@ -3055,7 +3127,8 @@ window.App = (function () {
             const el = getElement(id);
             if (!el) continue;
             if (el.type === 'arrow') {
-                snaps.push({ id, type: 'arrow', x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2 });
+                snaps.push({ id, type: 'arrow', x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2,
+                    cx: el.cx, cy: el.cy });
             } else {
                 snaps.push({ id, type: el.type, x: el.x, y: el.y, w: el.w, h: el.h });
             }
@@ -3124,6 +3197,10 @@ window.App = (function () {
                     el.y1 = snap.y1 + dy;
                     el.x2 = snap.x2 + dx;
                     el.y2 = snap.y2 + dy;
+                    if (snap.cx !== undefined && snap.cx !== null) {
+                        el.cx = snap.cx + dx;
+                        el.cy = snap.cy + dy;
+                    }
                 } else {
                     el.x = snap.x + dx;
                     el.y = snap.y + dy;
@@ -3148,6 +3225,23 @@ window.App = (function () {
                 el.x2 = world.x;
                 el.y2 = world.y;
             }
+            scheduleRender(false);
+            return;
+        }
+
+        if (d.type === 'arrow-control') {
+            const world = screenToWorld(e.clientX, e.clientY);
+            const el = getElement(d.elId);
+            if (!el) return;
+            const dx = world.x - d.startWorld.x;
+            const dy = world.y - d.startWorld.y;
+            if (!d.moved) {
+                if (Math.abs(dx * S.zoom) < CONFIG.DRAG_THRESHOLD && Math.abs(dy * S.zoom) < CONFIG.DRAG_THRESHOLD) return;
+                pushHistory();
+                d.moved = true;
+            }
+            el.cx = d.cx0 + dx;
+            el.cy = d.cy0 + dy;
             scheduleRender(false);
             return;
         }
@@ -3205,6 +3299,10 @@ window.App = (function () {
                     el.y1 = ny + (snap.y1 - b.y) * scaleY;
                     el.x2 = nx + (snap.x2 - b.x) * scaleX;
                     el.y2 = ny + (snap.y2 - b.y) * scaleY;
+                    if (snap.cx !== undefined && snap.cx !== null) {
+                        el.cx = nx + (snap.cx - b.x) * scaleX;
+                        el.cy = ny + (snap.cy - b.y) * scaleY;
+                    }
                 } else {
                     el.x = nx + (snap.x - b.x) * scaleX;
                     el.y = ny + (snap.y - b.y) * scaleY;
@@ -3311,12 +3409,24 @@ window.App = (function () {
             }
         } else if (d.type === 'marquee') {
             clearNode(D.previewG);
-        } else if (d.type === 'move' || d.type === 'resize' || d.type === 'arrow-endpoint') {
+        } else if (d.type === 'move' || d.type === 'resize' || d.type === 'arrow-endpoint' || d.type === 'arrow-control') {
             // Only re-render when the drag actually changed something.
             // Otherwise (plain click with no movement) skip the DOM rebuild so that
             // the native dblclick/pointer-based double-click detection keeps working
             // on the same SVG nodes across both clicks.
             if (d.moved) {
+                // Snap curved arrow back to straight if the control point is very close to midpoint
+                if (d.type === 'arrow-control') {
+                    const el = getElement(d.elId);
+                    if (el && el.cx !== undefined && el.cx !== null) {
+                        const midX = (el.x1 + el.x2) / 2;
+                        const midY = (el.y1 + el.y2) / 2;
+                        if (Math.hypot(el.cx - midX, el.cy - midY) < 3) {
+                            delete el.cx;
+                            delete el.cy;
+                        }
+                    }
+                }
                 scheduleSave();
                 renderElements();
                 renderSelection();
@@ -3462,6 +3572,8 @@ window.App = (function () {
                     if (!el) continue;
                     if (el.type === 'arrow') {
                         el.x1 += dx; el.y1 += dy; el.x2 += dx; el.y2 += dy;
+                        if (el.cx !== undefined && el.cx !== null) el.cx += dx;
+                        if (el.cy !== undefined && el.cy !== null) el.cy += dy;
                     } else {
                         el.x += dx; el.y += dy;
                     }
