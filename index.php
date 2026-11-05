@@ -1715,7 +1715,7 @@ window.App = (function () {
         if (!S.board) return;
         const sorted = [...S.board.layers].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
         for (const el of sorted) {
-            if (el.hidden) continue;
+            if (el.hidden || el._editing) continue;
             const node = createElementNode(el);
             if (node) D.elementsG.appendChild(node);
         }
@@ -2472,6 +2472,13 @@ window.App = (function () {
             D.previewG.appendChild(svgEl('line', {
                 x1: sx, y1: sy, x2: ex, y2: ey,
                 stroke: accent, 'stroke-width': 2 / S.zoom, 'vector-effect': 'non-scaling-stroke',
+            }));
+        } else if (tool === 'text') {
+            D.previewG.appendChild(svgEl('rect', {
+                x, y,
+                width: Math.max(w, 160), height: Math.max(h, 40),
+                fill: 'rgba(91,108,255,0.08)', stroke: accent, 'stroke-width': 1.5 / S.zoom,
+                'stroke-dasharray': '4 3', 'vector-effect': 'non-scaling-stroke',
             }));
         }
     }
@@ -3238,7 +3245,33 @@ window.App = (function () {
         if (d.type === 'pan') {
             D.canvas.classList.remove('panning');
         } else if (d.type === 'draw') {
-            if (d.moved) {
+            if (d.tool === 'text') {
+                const world = screenToWorld(e.clientX, e.clientY);
+                let x = Math.min(d.startWorld.x, world.x);
+                let y = Math.min(d.startWorld.y, world.y);
+                let w = Math.abs(world.x - d.startWorld.x);
+                let h = Math.abs(world.y - d.startWorld.y);
+                // Simple click → default size
+                if (w < 20) { x = d.startWorld.x; w = 180; }
+                if (h < 20) { y = d.startWorld.y; h = 40; }
+
+                pushHistory();
+                const el = createElement('text', x, y, {
+                    x, y, w, h,
+                    text: '',
+                    fontSize: 18,
+                    textAlign: 'left',
+                    color: '#111111',
+                    fontWeight: 'normal',
+                    fontStyle: 'normal',
+                });
+                normalizeZ();
+                selectOnly(el.id);
+                scheduleSave();
+                clearNode(D.previewG);
+                setTool('select');
+                startTextEdit(el.id);
+            } else if (d.moved) {
                 const world = screenToWorld(e.clientX, e.clientY);
                 commitDrawnElement(d.tool, d.startWorld.x, d.startWorld.y, world.x, world.y, e.shiftKey);
                 setTool('select');
