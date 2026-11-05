@@ -1132,6 +1132,8 @@ window.App = (function () {
         UPLOAD_MAX_DIM: 1600,
         UPLOAD_QUALITY: 0.85,
         TEXT_MIN_SIZE: 12,
+        DBLCLICK_MS: 400,
+        DBLCLICK_SLOP: 5,
     };
 
     // ========================================================================
@@ -1172,6 +1174,9 @@ window.App = (function () {
         editingId: null,     // currently text-editing element
         propSnapshot: null,  // snapshot before property edit
         dragSrcLayerId: null,// layer reorder
+
+        // Manual double-click tracking
+        lastClick: { time: 0, x: 0, y: 0, id: null },
 
         // Render throttling
         renderPending: false,
@@ -2908,6 +2913,32 @@ window.App = (function () {
 
         const hitId = getHitElement(e.target);
 
+        // Manual double-click detection for text/rectangle editing.
+        // We can't rely on the native dblclick because we call preventDefault() below
+        // (which suppresses compatibility mouse events) and because renderElements()
+        // rebuilds the SVG DOM between clicks, so the native dblclick target changes.
+        if (S.tool === 'select' && hitId) {
+            const now = Date.now();
+            const lc = S.lastClick;
+            const isDbl = lc.id === hitId &&
+                          (now - lc.time) < CONFIG.DBLCLICK_MS &&
+                          Math.abs(e.clientX - lc.x) < CONFIG.DBLCLICK_SLOP &&
+                          Math.abs(e.clientY - lc.y) < CONFIG.DBLCLICK_SLOP;
+            S.lastClick = { time: now, x: e.clientX, y: e.clientY, id: hitId };
+
+            if (isDbl) {
+                const dblEl = getElement(hitId);
+                if (dblEl && (dblEl.type === 'text' || dblEl.type === 'rectangle')) {
+                    e.preventDefault();
+                    selectOnly(dblEl.id);
+                    startTextEdit(dblEl.id);
+                    return;
+                }
+            }
+        } else {
+            S.lastClick = { time: Date.now(), x: e.clientX, y: e.clientY, id: hitId };
+        }
+
         // Drawing tool
         if (S.tool !== 'select' && S.tool !== 'image') {
             const w = screenToWorld(e.clientX, e.clientY);
@@ -3281,14 +3312,20 @@ window.App = (function () {
         } else if (d.type === 'marquee') {
             clearNode(D.previewG);
         } else if (d.type === 'move' || d.type === 'resize' || d.type === 'arrow-endpoint') {
-            if (d.moved) scheduleSave();
+            // Only re-render when the drag actually changed something.
+            // Otherwise (plain click with no movement) skip the DOM rebuild so that
+            // the native dblclick/pointer-based double-click detection keeps working
+            // on the same SVG nodes across both clicks.
+            if (d.moved) {
+                scheduleSave();
+                renderElements();
+                renderSelection();
+                renderLayers();
+                renderProperties();
+            }
             document.body.classList.remove('no-select');
             document.body.classList.remove('dragging');
             D.canvas.style.cursor = '';
-            renderElements();
-            renderSelection();
-            renderLayers();
-            renderProperties();
         }
 
         S.drag = null;
@@ -3296,7 +3333,10 @@ window.App = (function () {
     }
 
     function onCanvasDoubleClick(e) {
+        // Fallback: manual detection in onCanvasPointerDown normally handles this.
+        // This only fires if the browser still delivers a native dblclick.
         if (S.tool !== 'select') return;
+        if (S.editingId) return; // Already in text-edit mode
         const hitId = getHitElement(e.target);
         if (!hitId) return;
         const el = getElement(hitId);
